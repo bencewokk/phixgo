@@ -12,15 +12,13 @@ import (
 )
 
 const (
-	gravity                = 0.09
-	floorFriction          = 0.5
+	gravity                = 0.2
 	maxSpeed               = 10.0
 	velocityGrowthFactor   = 1.05
 	velocityTransferFactor = 0.3
 	moveAwayDistance       = 100.0
 	moveAwayStrength       = 5.0
-	moveAttractDistance    = 200.0
-	moveAttractStrength    = 5.0
+	moveAttractStrength    = 10.0
 	screenPadding          = 50.0
 )
 
@@ -72,16 +70,27 @@ func velocityToColor(velocity float32) color.Color {
 	g := uint8(normalizedSpeed * 255)
 	b := uint8((1 - normalizedSpeed) * 255)
 
-	return color.RGBA{R: 0, G: g, B: b, A: 255}
+	return color.RGBA{R: g, G: b, B: 0, A: 255}
 }
+
+var ballsize float64
+var moveAttractDistance float64 = 200.0
 
 func (g *Game) Update() error {
 	_, my := ebiten.Wheel()
 
-	if my < 0 {
-		d += 0.2
-	} else if my > 0 {
-		d -= 0.2
+	if ebiten.IsKeyPressed(ebiten.KeyShift) {
+		if my < 0 {
+			moveAttractDistance += 2
+		} else if my > 0 {
+			moveAttractDistance -= 2
+		}
+	} else {
+		if my < 0 {
+			ballsize += 0.5
+		} else if my > 0 {
+			ballsize -= 0.5
+		}
 	}
 
 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
@@ -97,9 +106,10 @@ func (g *Game) Update() error {
 					balls = append(balls[:i], balls[i+1:]...)
 				}
 			}
-		} else if d != 0 {
-			balls = append(balls, createBall(createPos(float32(x), float32(y)), float32(math.Abs(d))))
-			balls = append(balls, createBall(createPos(float32(x), float32(y)), float32(math.Abs(d))))
+		} else if ballsize != 0 {
+			balls = append(balls, createBall(createPos(float32(x), float32(y)), float32(math.Abs(ballsize+3))))
+			balls = append(balls, createBall(createPos(float32(x), float32(y)), float32(math.Abs(ballsize))))
+			balls = append(balls, createBall(createPos(float32(x), float32(y)), float32(math.Abs(ballsize-3))))
 		}
 	}
 
@@ -113,7 +123,7 @@ func (g *Game) Update() error {
 				dy := balls[i].pos.y - mousePos.y
 				distance := float32(math.Sqrt(float64(dx*dx + dy*dy)))
 
-				if distance < moveAttractDistance {
+				if float64(distance) < math.Abs(moveAttractDistance) {
 					moveX := -dx / distance * moveAttractStrength
 					moveY := -dy / distance * moveAttractStrength
 
@@ -146,15 +156,26 @@ func (g *Game) Update() error {
 		balls[i].pos.x += balls[i].velocity.vx
 		balls[i].pos.y += balls[i].velocity.vy
 
+		// Bottom boundary check
 		if balls[i].pos.y+balls[i].radius > float32(screenHeight)-screenPadding {
 			balls[i].pos.y = float32(screenHeight) - balls[i].radius - screenPadding
 			balls[i].velocity.vy *= -0.5
 		}
 
+		// Top boundary check
+		// if balls[i].pos.y-balls[i].radius < 0 {
+		// 	balls[i].pos.y = balls[i].radius
+		// 	balls[i].velocity.vy *= -0.5
+		// }
+
+		// Left boundary check
 		if balls[i].pos.x-balls[i].radius < 0 {
 			balls[i].pos.x = balls[i].radius
 			balls[i].velocity.vx *= -1
-		} else if balls[i].pos.x+balls[i].radius > float32(screenWidth) {
+		}
+
+		// Right boundary check
+		if balls[i].pos.x+balls[i].radius > float32(screenWidth) {
 			balls[i].pos.x = float32(screenWidth) - balls[i].radius
 			balls[i].velocity.vx *= -1
 		}
@@ -172,8 +193,8 @@ func (g *Game) Update() error {
 				balls[j].velocity.vy -= transferY
 
 				overlap := (balls[i].radius + balls[j].radius) - float32(math.Sqrt(float64((balls[i].pos.x-balls[j].pos.x)*(balls[i].pos.x-balls[j].pos.x)+(balls[i].pos.y-balls[j].pos.y)*(balls[i].pos.y-balls[j].pos.y))))
-				moveX := (balls[i].pos.x - balls[j].pos.x) * overlap / 80
-				moveY := (balls[i].pos.y - balls[j].pos.y) * overlap / 120
+				moveX := (balls[i].pos.x - balls[j].pos.x) * overlap / 120
+				moveY := (balls[i].pos.y - balls[j].pos.y) * overlap / 80
 				balls[i].pos.x += moveX
 				balls[i].pos.y += moveY
 				balls[j].pos.x -= moveX
@@ -186,11 +207,10 @@ func (g *Game) Update() error {
 }
 
 var balls []Ball
-var d float64
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	fps := ebiten.CurrentFPS()
-	bc := fmt.Sprintf("%.f balls | FPS: %.2f | ball radius: %.2f", float64(len(balls)), fps, math.Abs(d))
+	bc := fmt.Sprintf("%.f balls | FPS: %.2f | ball radius: %.2f | attract radius: %.f", float64(len(balls)), fps, math.Abs(ballsize), moveAttractDistance)
 	ebitenutil.DebugPrint(screen, bc)
 
 	for i := 0; i < len(balls); i++ {

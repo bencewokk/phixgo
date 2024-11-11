@@ -13,7 +13,7 @@ import (
 
 const (
 	gravity                = 0.09
-	floorFriction          = 0.4
+	floorFriction          = 0.5
 	maxSpeed               = 10.0
 	velocityGrowthFactor   = 1.05
 	velocityTransferFactor = 0.3
@@ -177,7 +177,7 @@ func (g *Game) Update() error {
 				balls[i].pos.x += moveX
 				balls[i].pos.y += moveY
 				balls[j].pos.x -= moveX
-				balls[j].pos.y -= moveY * 2
+				balls[j].pos.y -= moveY
 			}
 		}
 	}

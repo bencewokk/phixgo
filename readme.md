@@ -1,4 +1,4 @@
-# PHIX - Game Controls
+# PHIX 
 
 ## Controls
 

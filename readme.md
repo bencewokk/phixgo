@@ -11,4 +11,4 @@
 ## How to run
 
 - You will need a golang compiler (it was written in go 1.23.1 but it should work with everything else)
-- Just run 'go run .'
+- Just run ```go run .```

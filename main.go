@@ -53,12 +53,12 @@ func defaultSettings() Settings {
 }
 
 type Game struct {
-	settings         Settings
-	showMenu         bool
-	selectedOption   int
-	prevEscPressed   bool
-	prevUpPressed    bool
-	prevDownPressed  bool
+	settings        Settings
+	showMenu        bool
+	selectedOption  int
+	prevEscPressed  bool
+	prevUpPressed   bool
+	prevDownPressed bool
 }
 
 func NewGame() *Game {
@@ -193,11 +193,11 @@ func drawShape(screen *ebiten.Image, shape ShapeType, x, y, radius float32, col 
 		// Draw equilateral triangle
 		height := radius * 1.732 // sqrt(3)
 		path := vector.Path{}
-		path.MoveTo(x, y-height*0.67)                    // Top vertex
-		path.LineTo(x-radius, y+height*0.33)             // Bottom left
-		path.LineTo(x+radius, y+height*0.33)             // Bottom right
+		path.MoveTo(x, y-height*0.67)        // Top vertex
+		path.LineTo(x-radius, y+height*0.33) // Bottom left
+		path.LineTo(x+radius, y+height*0.33) // Bottom right
 		path.Close()
-		
+
 		vertices, indices := path.AppendVerticesAndIndicesForFilling(nil, nil)
 		for i := range vertices {
 			vertices[i].ColorR = float32(col.(color.RGBA).R) / 255
@@ -214,11 +214,11 @@ func drawShape(screen *ebiten.Image, shape ShapeType, x, y, radius float32, col 
 var emptyImage = ebiten.NewImage(3, 3)
 
 var (
-	ballsize             float64 = 10
-	moveAttractDistance  float64 = 200.0
-	balls                []Ball
-	ballSpawnTimer       int
-	currentShape         ShapeType = ShapeCircle
+	ballsize            float64 = 10
+	moveAttractDistance float64 = 200.0
+	balls               []Ball
+	ballSpawnTimer      int
+	currentShape        ShapeType = ShapeCircle
 )
 
 func (g *Game) Update() error {
@@ -233,7 +233,7 @@ func (g *Game) Update() error {
 	if g.showMenu {
 		upPressed := ebiten.IsKeyPressed(ebiten.KeyUp)
 		downPressed := ebiten.IsKeyPressed(ebiten.KeyDown)
-		
+
 		if upPressed && !g.prevUpPressed {
 			g.selectedOption--
 			if g.selectedOption < 0 {
@@ -246,17 +246,17 @@ func (g *Game) Update() error {
 				g.selectedOption = 0
 			}
 		}
-		
+
 		g.prevUpPressed = upPressed
 		g.prevDownPressed = downPressed
-		
+
 		// Adjust selected setting
 		_, my := ebiten.Wheel()
 		changeAmount := float32(0.01)
 		if ebiten.IsKeyPressed(ebiten.KeyShift) {
 			changeAmount = 0.1
 		}
-		
+
 		if my != 0 {
 			change := float32(my) * changeAmount
 			switch g.selectedOption {
@@ -288,7 +288,7 @@ func (g *Game) Update() error {
 				}
 			}
 		}
-		
+
 		return nil // Don't update physics when menu is open
 	}
 
@@ -385,7 +385,7 @@ func (g *Game) Update() error {
 	dragFactor := 1 - g.settings.airDrag
 	bottomLimit := float32(screenHeight) - screenPadding
 	rightLimit := float32(screenWidth)
-	
+
 	for i := range balls {
 		balls[i].velocity.vy += g.settings.gravity
 		balls[i].velocity.vx *= dragFactor
@@ -441,7 +441,7 @@ func (g *Game) Update() error {
 func (g *Game) Draw(screen *ebiten.Image) {
 	fps := ebiten.CurrentFPS()
 	shapeName := []string{"Circle", "Square", "Triangle"}[currentShape]
-	bc := fmt.Sprintf("%.f balls | FPS: %.2f | ball radius: %.2f | attract radius: %.f | Shape: %s (1/2/3)", 
+	bc := fmt.Sprintf("%.f balls | FPS: %.2f | ball radius: %.2f | attract radius: %.f | Shape: %s (1/2/3)",
 		float64(len(balls)), fps, ballsize, moveAttractDistance, shapeName)
 	ebitenutil.DebugPrint(screen, bc)
 
@@ -461,7 +461,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		menuY := float32(screenHeight)/2 - 250
 		title := "=== SETTINGS MENU ==="
 		ebitenutil.DebugPrintAt(screen, title, int(menuX), int(menuY))
-		
+
 		menuY += 40
 		ebitenutil.DebugPrintAt(screen, "Use UP/DOWN arrows to navigate", int(menuX), int(menuY))
 		menuY += 15

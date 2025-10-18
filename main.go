@@ -12,11 +12,33 @@ import (
 )
 
 const (
-	screenPadding     = float32(50.0)
-	minimumSeparation = float32(0.0001)
-	minSpawnRadius    = float32(4.0)
-	maxSpawnRadius    = float32(120.0)
-	ballSpawnStep     = 0.5
+	screenPadding      = float32(50.0)
+	minimumSeparation  = float32(0.0001)
+	minSpawnRadius     = float32(4.0) // Minimum radius for spawning balls
+	maxSpawnRadius     = float32(120.0)
+	ballSpawnStep      = 0.5
+	maxCollisionSolves = 4 // Reduced max collision solves for performance
+	penetrationSlop    = float32(0.001)
+	waterRestDistance  = float32(12.0)
+	waterInteraction   = waterRestDistance * 1.8
+	waterViscosity     = float32(0.55)
+	waterSpawnClampMin = float32(3.0)
+	waterSpawnClampMax = float32(20.0)
+	waterRestDensity   = float32(4.5)
+	waterPressureStiff = float32(0.32)
+	waterNearStiff     = float32(1.1)
+	waterBoundaryPush  = float32(0.22)
+	waterBoundaryDrag  = float32(0.05)
+	gasRestDistance    = float32(16.0)
+	gasInteraction     = gasRestDistance * 1.5
+	gasPressure        = float32(0.12)
+	gasViscosity       = float32(0.08)
+	gasBuoyancy        = float32(0.25)
+	gasDrag            = float32(0.05)
+	gasSpawnClampMin   = float32(4.0)
+	gasSpawnClampMax   = float32(30.0)
+	gasBoundaryPush    = float32(0.12)
+	gasBoundaryDrag    = float32(0.04)
 )
 
 var (
@@ -53,18 +75,38 @@ func defaultSettings() Settings {
 }
 
 type Game struct {
-	settings        Settings
-	showMenu        bool
-	selectedOption  int
-	prevEscPressed  bool
-	prevUpPressed   bool
-	prevDownPressed bool
+	settings          Settings
+	showMenu          bool
+	selectedOption    int
+	prevEscPressed    bool
+	prevUpPressed     bool
+	prevDownPressed   bool
+	collider          spatialHash
+	cellCache         []cellCoord
+	spawnClusterCount int
+	waterCollider     spatialHash
+	waterCellCache    []cellCoord
+	waterIndices      []int
+	waterDensity      []float32
+	waterNearDensity  []float32
+	waterIndexMap     map[int]int
+	solidCollider     spatialHash
+	solidIndices      []int
+	gasCollider       spatialHash
+	gasCellCache      []cellCoord
+	gasIndices        []int
 }
 
 func NewGame() *Game {
 	return &Game{
-		settings: defaultSettings(),
-		showMenu: false,
+		settings:          defaultSettings(),
+		showMenu:          false,
+		collider:          newSpatialHash(maxSpawnRadius * 2),
+		spawnClusterCount: 3,
+		waterCollider:     newSpatialHash(waterRestDistance * 2),
+		waterIndexMap:     make(map[int]int),
+		solidCollider:     newSpatialHash(maxSpawnRadius * 2),
+		gasCollider:       newSpatialHash(gasRestDistance * 2),
 	}
 }
 
@@ -86,6 +128,9 @@ const (
 	ShapeCircle ShapeType = iota
 	ShapeSquare
 	ShapeTriangle
+	ShapeWater
+	ShapeGas
+	ShapeStatic
 )
 
 type Ball struct {
@@ -93,10 +138,103 @@ type Ball struct {
 	velocity Velocity
 	radius   float32
 	shape    ShapeType
+	material MaterialType
 }
 
 func createBall(pos Pos, r float32, shape ShapeType) Ball {
-	return Ball{pos: pos, velocity: Velocity{vx: 0, vy: 0}, radius: r, shape: shape}
+	return Ball{pos: pos, velocity: Velocity{vx: 0, vy: 0}, radius: r, shape: shape, material: MaterialSolid}
+}
+
+type MaterialType int
+
+const (
+	MaterialSolid MaterialType = iota
+	MaterialWater
+	MaterialGas
+	MaterialStatic
+)
+
+func createWaterParticle(pos Pos, r float32) Ball {
+	b := createBall(pos, r, ShapeWater)
+	b.material = MaterialWater
+	return b
+}
+
+func createGasParticle(pos Pos, r float32) Ball {
+	b := createBall(pos, r, ShapeGas)
+	b.material = MaterialGas
+	return b
+}
+
+func createStaticSolid(pos Pos, r float32, shape ShapeType) Ball {
+	b := createBall(pos, r, shape)
+	b.material = MaterialStatic
+	return b
+}
+
+// spatialHash accelerates neighbor lookups via a uniform grid.
+type spatialHash struct {
+	cellSize      float32
+	invCellSize   float32
+	invCellSize64 float64
+	buckets       map[int64][]int
+	usedKeys      []int64
+}
+
+type cellCoord struct {
+	x int
+	y int
+}
+
+func newSpatialHash(cellSize float32) spatialHash {
+	if cellSize <= 0 {
+		cellSize = 1
+	}
+	inv := 1 / cellSize
+	return spatialHash{
+		cellSize:      cellSize,
+		invCellSize:   inv,
+		invCellSize64: float64(inv),
+		buckets:       make(map[int64][]int),
+	}
+}
+
+func (h *spatialHash) Clear() {
+	for _, key := range h.usedKeys {
+		h.buckets[key] = h.buckets[key][:0]
+	}
+	h.usedKeys = h.usedKeys[:0]
+}
+
+func (h *spatialHash) insert(index, ix, iy int) {
+	key := hashKey(ix, iy)
+	bucket := h.buckets[key]
+	if bucket == nil {
+		bucket = make([]int, 0, 8)
+	}
+	if len(bucket) == 0 {
+		h.usedKeys = append(h.usedKeys, key)
+	}
+	bucket = append(bucket, index)
+	h.buckets[key] = bucket
+}
+
+func (h *spatialHash) cell(ix, iy int) []int {
+	key := hashKey(ix, iy)
+	return h.buckets[key]
+}
+
+func (h *spatialHash) coord(value float32) int {
+	return int(math.Floor(float64(value) * h.invCellSize64))
+}
+
+func hashKey(ix, iy int) int64 {
+	return (int64(uint32(ix)) << 32) | int64(uint32(iy))
+}
+
+var neighborOffsets = [...]struct{ dx, dy int }{
+	{0, 0}, {1, 0}, {-1, 0}, {0, 1}, {0, -1},
+	{1, 1}, {1, -1}, {-1, 1}, {-1, -1},
 }
 
 func (b *Ball) speed() float32 {
@@ -116,59 +254,111 @@ func normalize(dx, dy float32) (nx, ny, distance float32) {
 	return dx / distance, dy / distance, distance
 }
 
-func resolveCollision(b1, b2 *Ball, collisionRestitution float32) {
+func mobilityFor(material MaterialType) float32 {
+	if material == MaterialStatic {
+		return 0
+	}
+	return 1
+}
+
+func resolveCollision(b1, b2 *Ball, collisionRestitution float32) bool {
+	return resolveCollisionCustom(b1, b2, collisionRestitution, 0.5)
+}
+
+func resolveCollisionCustom(b1, b2 *Ball, collisionRestitution, friction float32) bool {
 	dx := b2.pos.x - b1.pos.x
 	dy := b2.pos.y - b1.pos.y
-	nx, ny, distance := normalize(dx, dy)
+	combinedRadius := b1.radius + b2.radius
+	combinedRadiusSq := combinedRadius * combinedRadius
+	distSq := dx*dx + dy*dy
+	if distSq >= combinedRadiusSq {
+		return false
+	}
+
+	if distSq < minimumSeparation*minimumSeparation {
+		distSq = minimumSeparation * minimumSeparation
+	}
+
+	distance := float32(math.Sqrt(float64(distSq)))
+	nx := dx / distance
+	ny := dy / distance
 	if nx == 0 && ny == 0 {
 		nx = 1
 	}
-	combinedRadius := b1.radius + b2.radius
 	overlap := combinedRadius - distance
 	if overlap <= 0 {
-		return
+		return false
 	}
 
-	// Push balls apart proportionally to their radii to avoid jitter.
-	totalRadius := combinedRadius
-	if totalRadius < minimumSeparation {
-		totalRadius = minimumSeparation
+	mob1 := mobilityFor(b1.material)
+	mob2 := mobilityFor(b2.material)
+
+	// Add a small slop to keep shapes from sinking into each other when resting.
+	separation := overlap + penetrationSlop
+	weight1 := mob1
+	weight2 := mob2
+	weightSum := weight1 + weight2
+	if weightSum == 0 {
+		return true
 	}
-	shift1 := overlap * (b2.radius / totalRadius)
-	shift2 := overlap * (b1.radius / totalRadius)
-	b1.pos.x -= nx * shift1
-	b1.pos.y -= ny * shift1
-	b2.pos.x += nx * shift2
-	b2.pos.y += ny * shift2
+	shift1 := separation * (weight1 / weightSum)
+	shift2 := separation * (weight2 / weightSum)
+	if mob1 > 0 {
+		b1.pos.x -= nx * shift1
+		b1.pos.y -= ny * shift1
+	}
+	if mob2 > 0 {
+		b2.pos.x += nx * shift2
+		b2.pos.y += ny * shift2
+	}
 
 	// Relative velocity along the normal.
 	rvx := b2.velocity.vx - b1.velocity.vx
 	rvy := b2.velocity.vy - b1.velocity.vy
 	velAlongNormal := rvx*nx + rvy*ny
 	if velAlongNormal > 0 {
-		return
+		return true
 	}
 
 	restitution := collisionRestitution
-	impulseScalar := -(1 + restitution) * velAlongNormal / 2 // equal mass assumption
+	invMass1 := mob1
+	invMass2 := mob2
+	massSum := invMass1 + invMass2
+	if massSum == 0 {
+		return true
+	}
+	impulseScalar := -(1 + restitution) * velAlongNormal / massSum
 	impulseX := impulseScalar * nx
 	impulseY := impulseScalar * ny
 
-	b1.velocity.vx -= impulseX
-	b1.velocity.vy -= impulseY
-	b2.velocity.vx += impulseX
-	b2.velocity.vy += impulseY
+	if invMass1 > 0 {
+		b1.velocity.vx -= impulseX * invMass1
+		b1.velocity.vy -= impulseY * invMass1
+	}
+	if invMass2 > 0 {
+		b2.velocity.vx += impulseX * invMass2
+		b2.velocity.vy += impulseY * invMass2
+	}
 
 	// Simple tangential friction to reduce sliding after collision.
 	// Compute tangential speed and apply proportional friction impulse.
 	tx := -ny
 	ty := nx
 	relTangential := rvx*tx + rvy*ty
-	frictionImpulse := relTangential * 0.5
-	b1.velocity.vx += tx * frictionImpulse
-	b1.velocity.vy += ty * frictionImpulse
-	b2.velocity.vx -= tx * frictionImpulse
-	b2.velocity.vy -= ty * frictionImpulse
+	if friction != 0 {
+		frictionScalar := relTangential * friction / massSum
+		fx := tx * frictionScalar
+		fy := ty * frictionScalar
+		if invMass1 > 0 {
+			b1.velocity.vx += fx * invMass1
+			b1.velocity.vy += fy * invMass1
+		}
+		if invMass2 > 0 {
+			b2.velocity.vx -= fx * invMass2
+			b2.velocity.vy -= fy * invMass2
+		}
+	}
+	return true
 }
 
 func velocityToColor(velocity float32, maxSpeed float32) color.Color {
@@ -208,10 +398,18 @@ func drawShape(screen *ebiten.Image, shape ShapeType, x, y, radius float32, col 
 		screen.DrawTriangles(vertices, indices, emptyImage, &ebiten.DrawTrianglesOptions{
 			AntiAlias: false,
 		})
+	case ShapeWater:
+		vector.DrawFilledCircle(screen, x, y, radius, col, false)
+	case ShapeGas:
+		vector.DrawFilledCircle(screen, x, y, radius, col, false)
+	case ShapeStatic:
+		vector.DrawFilledCircle(screen, x, y, radius, col, false)
 	}
 }
 
 var emptyImage = ebiten.NewImage(3, 3)
+
+const menuOptionCount = 12
 
 var (
 	ballsize            float64 = 10
@@ -237,12 +435,12 @@ func (g *Game) Update() error {
 		if upPressed && !g.prevUpPressed {
 			g.selectedOption--
 			if g.selectedOption < 0 {
-				g.selectedOption = 10 // Number of menu options - 1
+				g.selectedOption = menuOptionCount - 1
 			}
 		}
 		if downPressed && !g.prevDownPressed {
 			g.selectedOption++
-			if g.selectedOption > 10 {
+			if g.selectedOption > menuOptionCount-1 {
 				g.selectedOption = 0
 			}
 		}
@@ -278,11 +476,23 @@ func (g *Game) Update() error {
 				g.settings.airDrag = float32(math.Min(1, math.Max(0, float64(g.settings.airDrag+change))))
 			case 8: // Ground Friction
 				g.settings.groundFriction = float32(math.Min(1, math.Max(0, float64(g.settings.groundFriction+change))))
-			case 9: // Top Barrier
+			case 9: // Spawn Count
+				delta := int(my)
+				if ebiten.IsKeyPressed(ebiten.KeyShift) {
+					delta *= 5
+				}
+				g.spawnClusterCount += delta
+				if g.spawnClusterCount < 1 {
+					g.spawnClusterCount = 1
+				}
+				if g.spawnClusterCount > 50 {
+					g.spawnClusterCount = 50
+				}
+			case 10: // Top Barrier
 				if my != 0 {
 					g.settings.hasTopBarrier = !g.settings.hasTopBarrier
 				}
-			case 10: // Exit
+			case 11: // Exit
 				if my > 0 {
 					return ebiten.Termination
 				}
@@ -299,6 +509,12 @@ func (g *Game) Update() error {
 		currentShape = ShapeSquare
 	} else if ebiten.IsKeyPressed(ebiten.Key3) {
 		currentShape = ShapeTriangle
+	} else if ebiten.IsKeyPressed(ebiten.Key4) {
+		currentShape = ShapeWater
+	} else if ebiten.IsKeyPressed(ebiten.Key5) {
+		currentShape = ShapeGas
+	} else if ebiten.IsKeyPressed(ebiten.Key6) {
+		currentShape = ShapeStatic
 	}
 
 	_, my := ebiten.Wheel()
@@ -335,11 +551,51 @@ func (g *Game) Update() error {
 				}
 			}
 		} else if ballSpawnTimer <= 0 {
-			radiiOffsets := []float64{3, 0, -3}
-			for _, offset := range radiiOffsets {
-				size := ballsize + offset
-				radius := float32(math.Min(math.Max(size, float64(minSpawnRadius)), float64(maxSpawnRadius)))
-				balls = append(balls, createBall(createPos(float32(x), float32(y)), radius, currentShape))
+			count := g.spawnClusterCount
+			if count < 1 {
+				count = 1
+			}
+			clampSolid := func(size float64) float32 {
+				return float32(math.Min(math.Max(size, float64(minSpawnRadius)), float64(maxSpawnRadius)))
+			}
+			clampWater := func(size float64) float32 {
+				return float32(math.Min(math.Max(size, float64(waterSpawnClampMin)), float64(waterSpawnClampMax)))
+			}
+			clampGas := func(size float64) float32 {
+				return float32(math.Min(math.Max(size, float64(gasSpawnClampMin)), float64(gasSpawnClampMax)))
+			}
+			baseSolid := clampSolid(ballsize)
+			baseWater := clampWater(ballsize)
+			baseGas := clampGas(ballsize)
+			for n := 0; n < count; n++ {
+				angle := 0.0
+				if count > 1 {
+					angle = 2 * math.Pi * float64(n) / float64(count)
+				}
+				offsetScale := float32(0)
+				if count > 1 {
+					switch currentShape {
+					case ShapeWater:
+						offsetScale = baseWater * 0.5
+					case ShapeGas:
+						offsetScale = baseGas * 0.4
+					default:
+						offsetScale = baseSolid * 0.6
+					}
+				}
+				offsetX := float32(math.Cos(angle)) * offsetScale
+				offsetY := float32(math.Sin(angle)) * offsetScale
+				pos := createPos(float32(x)+offsetX, float32(y)+offsetY)
+				switch currentShape {
+				case ShapeWater:
+					balls = append(balls, createWaterParticle(pos, baseWater))
+				case ShapeGas:
+					balls = append(balls, createGasParticle(pos, baseGas))
+				case ShapeStatic:
+					balls = append(balls, createStaticSolid(pos, baseSolid, ShapeStatic))
+				default:
+					balls = append(balls, createBall(pos, baseSolid, currentShape))
+				}
 			}
 			ballSpawnTimer = 3 // Spawn every 3 frames (20 times per second at 60 FPS)
 		}
@@ -382,11 +638,17 @@ func (g *Game) Update() error {
 		}
 	}
 
+	g.applyWaterForces()
+	g.applyGasForces()
+
 	dragFactor := 1 - g.settings.airDrag
 	bottomLimit := float32(screenHeight) - screenPadding
 	rightLimit := float32(screenWidth)
 
 	for i := range balls {
+		if balls[i].material == MaterialStatic {
+			continue
+		}
 		balls[i].velocity.vy += g.settings.gravity
 		balls[i].velocity.vx *= dragFactor
 		balls[i].velocity.vy *= dragFactor
@@ -429,25 +691,433 @@ func (g *Game) Update() error {
 		}
 	}
 
-	for i := 0; i < len(balls); i++ {
-		for j := i + 1; j < len(balls); j++ {
-			resolveCollision(&balls[i], &balls[j], g.settings.collisionRestitution)
+	if len(balls) > 1 {
+		for iteration := 0; iteration < maxCollisionSolves; iteration++ {
+			g.collider.Clear()
+			if len(g.cellCache) < len(balls) {
+				g.cellCache = make([]cellCoord, len(balls))
+			}
+			for i := range balls {
+				cx := g.collider.coord(balls[i].pos.x)
+				cy := g.collider.coord(balls[i].pos.y)
+				g.cellCache[i] = cellCoord{x: cx, y: cy}
+				g.collider.insert(i, cx, cy)
+			}
+
+			anyResolved := false
+			for i := range balls {
+				coord := g.cellCache[i]
+				for _, offset := range neighborOffsets {
+					neighbors := g.collider.cell(coord.x+offset.dx, coord.y+offset.dy)
+					for _, j := range neighbors {
+						if j <= i {
+							continue
+						}
+						a := &balls[i]
+						b := &balls[j]
+						ma := a.material
+						mb := b.material
+						switch {
+						case ma == MaterialWater && mb == MaterialWater:
+							continue
+						case ma == MaterialGas && mb == MaterialGas:
+							continue
+						case (ma == MaterialWater && mb == MaterialGas) || (ma == MaterialGas && mb == MaterialWater):
+							if resolveCollisionCustom(a, b, g.settings.collisionRestitution*0.2, 0.04) {
+								anyResolved = true
+							}
+							continue
+						case ma == MaterialWater || mb == MaterialWater:
+							if resolveCollisionCustom(a, b, g.settings.collisionRestitution*0.25, 0.05) {
+								anyResolved = true
+							}
+							continue
+						case ma == MaterialGas || mb == MaterialGas:
+							if resolveCollisionCustom(a, b, g.settings.collisionRestitution*0.3, 0.02) {
+								anyResolved = true
+							}
+							continue
+						default:
+							if resolveCollision(a, b, g.settings.collisionRestitution) {
+								anyResolved = true
+							}
+						}
+					}
+				}
+			}
+			if !anyResolved {
+				break
+			}
 		}
 	}
 
 	return nil
 }
 
+func (g *Game) applyWaterForces() {
+	if len(balls) == 0 {
+		return
+	}
+
+	g.waterCollider.Clear()
+	g.solidCollider.Clear()
+	g.waterIndices = g.waterIndices[:0]
+	g.solidIndices = g.solidIndices[:0]
+
+	for i := range balls {
+		switch balls[i].material {
+		case MaterialWater:
+			g.waterIndices = append(g.waterIndices, i)
+		case MaterialSolid:
+			g.solidIndices = append(g.solidIndices, i)
+		case MaterialStatic:
+			g.solidIndices = append(g.solidIndices, i)
+		}
+	}
+
+	if len(g.waterIndices) == 0 {
+		return
+	}
+
+	if len(g.waterCellCache) < len(g.waterIndices) {
+		g.waterCellCache = make([]cellCoord, len(g.waterIndices))
+	}
+	if len(g.waterDensity) < len(g.waterIndices) {
+		g.waterDensity = make([]float32, len(g.waterIndices))
+	}
+	if len(g.waterNearDensity) < len(g.waterIndices) {
+		g.waterNearDensity = make([]float32, len(g.waterIndices))
+	}
+
+	for key := range g.waterIndexMap {
+		delete(g.waterIndexMap, key)
+	}
+
+	for idx, ballIdx := range g.waterIndices {
+		cx := g.waterCollider.coord(balls[ballIdx].pos.x)
+		cy := g.waterCollider.coord(balls[ballIdx].pos.y)
+		g.waterCellCache[idx] = cellCoord{x: cx, y: cy}
+		g.waterCollider.insert(ballIdx, cx, cy)
+		g.waterIndexMap[ballIdx] = idx
+	}
+
+	if len(g.solidIndices) > 0 {
+		for _, ballIdx := range g.solidIndices {
+			cx := g.solidCollider.coord(balls[ballIdx].pos.x)
+			cy := g.solidCollider.coord(balls[ballIdx].pos.y)
+			g.solidCollider.insert(ballIdx, cx, cy)
+		}
+	}
+
+	interactionRadius := waterInteraction
+	interactionRadiusSq := interactionRadius * interactionRadius
+
+	for idx, ballIdx := range g.waterIndices {
+		density := float32(0)
+		nearDensity := float32(0)
+		coord := g.waterCellCache[idx]
+		for _, offset := range neighborOffsets {
+			neighbors := g.waterCollider.cell(coord.x+offset.dx, coord.y+offset.dy)
+			for _, neighborIdx := range neighbors {
+				if neighborIdx == ballIdx {
+					continue
+				}
+				if balls[neighborIdx].material != MaterialWater {
+					continue
+				}
+				dx := balls[neighborIdx].pos.x - balls[ballIdx].pos.x
+				dy := balls[neighborIdx].pos.y - balls[ballIdx].pos.y
+				distSq := dx*dx + dy*dy
+				if distSq >= interactionRadiusSq || distSq < minimumSeparation*minimumSeparation {
+					continue
+				}
+				dist := float32(math.Sqrt(float64(distSq)))
+				if dist <= 0 {
+					continue
+				}
+				q := 1 - dist/interactionRadius
+				density += q * q
+				nearDensity += q * q * q
+			}
+		}
+		g.waterDensity[idx] = density + 1
+		g.waterNearDensity[idx] = nearDensity
+	}
+
+	for idx, ballIdx := range g.waterIndices {
+		coord := g.waterCellCache[idx]
+		density := g.waterDensity[idx]
+		nearDensity := g.waterNearDensity[idx]
+		pressure := waterPressureStiff * (density - waterRestDensity)
+		nearPressure := waterNearStiff * nearDensity
+
+		for _, offset := range neighborOffsets {
+			neighbors := g.waterCollider.cell(coord.x+offset.dx, coord.y+offset.dy)
+			for _, neighborIdx := range neighbors {
+				if neighborIdx <= ballIdx {
+					continue
+				}
+				neighborWaterIdx, ok := g.waterIndexMap[neighborIdx]
+				if !ok {
+					continue
+				}
+
+				dx := balls[neighborIdx].pos.x - balls[ballIdx].pos.x
+				dy := balls[neighborIdx].pos.y - balls[ballIdx].pos.y
+				distSq := dx*dx + dy*dy
+				if distSq >= interactionRadiusSq || distSq < minimumSeparation*minimumSeparation {
+					continue
+				}
+				dist := float32(math.Sqrt(float64(distSq)))
+				if dist <= 0 {
+					continue
+				}
+				q := 1 - dist/interactionRadius
+				nx := dx / dist
+				ny := dy / dist
+
+				neighborDensity := g.waterDensity[neighborWaterIdx]
+				neighborNearDensity := g.waterNearDensity[neighborWaterIdx]
+				neighborPressure := waterPressureStiff * (neighborDensity - waterRestDensity)
+				neighborNearPressure := waterNearStiff * neighborNearDensity
+
+				pressureMag := (pressure + neighborPressure) * 0.5
+				nearMag := (nearPressure + neighborNearPressure) * 0.5
+				force := q*pressureMag + q*q*nearMag
+				if force != 0 {
+					impulseX := nx * force
+					impulseY := ny * force
+					balls[ballIdx].velocity.vx -= impulseX
+					balls[ballIdx].velocity.vy -= impulseY
+					balls[neighborIdx].velocity.vx += impulseX
+					balls[neighborIdx].velocity.vy += impulseY
+				}
+
+				relVelX := balls[neighborIdx].velocity.vx - balls[ballIdx].velocity.vx
+				relVelY := balls[neighborIdx].velocity.vy - balls[ballIdx].velocity.vy
+				relAlongNormal := relVelX*nx + relVelY*ny
+				viscImpulse := relAlongNormal * waterViscosity * q * 0.5
+				viscX := nx * viscImpulse
+				viscY := ny * viscImpulse
+				balls[ballIdx].velocity.vx += viscX
+				balls[ballIdx].velocity.vy += viscY
+				balls[neighborIdx].velocity.vx -= viscX
+				balls[neighborIdx].velocity.vy -= viscY
+			}
+		}
+	}
+
+	for idx, waterIdx := range g.waterIndices {
+		waterBall := &balls[waterIdx]
+		baseRange := waterBall.radius + waterRestDistance
+		coord := g.waterCellCache[idx]
+		for _, offset := range neighborOffsets {
+			neighbors := g.solidCollider.cell(coord.x+offset.dx, coord.y+offset.dy)
+			for _, solidIdx := range neighbors {
+				dx := waterBall.pos.x - balls[solidIdx].pos.x
+				dy := waterBall.pos.y - balls[solidIdx].pos.y
+				allowed := balls[solidIdx].radius + baseRange
+				distSq := dx*dx + dy*dy
+				if distSq >= allowed*allowed || distSq < minimumSeparation*minimumSeparation {
+					continue
+				}
+				dist := float32(math.Sqrt(float64(distSq)))
+				if dist <= 0 {
+					continue
+				}
+				nx := dx / dist
+				ny := dy / dist
+				penetration := allowed - dist
+				push := penetration * waterBoundaryPush
+				waterBall.velocity.vx += nx * push
+				waterBall.velocity.vy += ny * push
+				if balls[solidIdx].material != MaterialStatic {
+					balls[solidIdx].velocity.vx -= nx * push * 0.25
+					balls[solidIdx].velocity.vy -= ny * push * 0.25
+				}
+
+				tx := -ny
+				ty := nx
+				relVelX := waterBall.velocity.vx - balls[solidIdx].velocity.vx
+				relVelY := waterBall.velocity.vy - balls[solidIdx].velocity.vy
+				relTangential := relVelX*tx + relVelY*ty
+				drag := relTangential * waterBoundaryDrag
+				waterBall.velocity.vx -= tx * drag
+				waterBall.velocity.vy -= ty * drag
+				if balls[solidIdx].material != MaterialStatic {
+					balls[solidIdx].velocity.vx += tx * drag * 0.25
+					balls[solidIdx].velocity.vy += ty * drag * 0.25
+				}
+			}
+		}
+	}
+}
+
+func (g *Game) applyGasForces() {
+	g.gasCollider.Clear()
+	g.gasIndices = g.gasIndices[:0]
+
+	for i := range balls {
+		if balls[i].material == MaterialGas {
+			g.gasIndices = append(g.gasIndices, i)
+		}
+	}
+
+	if len(g.gasIndices) == 0 {
+		return
+	}
+
+	if len(g.gasCellCache) < len(g.gasIndices) {
+		g.gasCellCache = make([]cellCoord, len(g.gasIndices))
+	}
+
+	for idx, ballIdx := range g.gasIndices {
+		cx := g.gasCollider.coord(balls[ballIdx].pos.x)
+		cy := g.gasCollider.coord(balls[ballIdx].pos.y)
+		g.gasCellCache[idx] = cellCoord{x: cx, y: cy}
+		g.gasCollider.insert(ballIdx, cx, cy)
+	}
+
+	g.solidCollider.Clear()
+	g.solidIndices = g.solidIndices[:0]
+	for i := range balls {
+		if balls[i].material != MaterialSolid && balls[i].material != MaterialStatic {
+			continue
+		}
+		g.solidIndices = append(g.solidIndices, i)
+		cx := g.solidCollider.coord(balls[i].pos.x)
+		cy := g.solidCollider.coord(balls[i].pos.y)
+		g.solidCollider.insert(i, cx, cy)
+	}
+
+	interactionRadius := gasInteraction
+	interactionRadiusSq := interactionRadius * interactionRadius
+	dragFactorX := 1 - gasDrag
+	dragFactorY := 1 - gasDrag*0.5
+
+	for _, ballIdx := range g.gasIndices {
+		balls[ballIdx].velocity.vy -= gasBuoyancy
+		balls[ballIdx].velocity.vx *= dragFactorX
+		balls[ballIdx].velocity.vy *= dragFactorY
+	}
+
+	for idx, ballIdx := range g.gasIndices {
+		coord := g.gasCellCache[idx]
+		for _, offset := range neighborOffsets {
+			neighbors := g.gasCollider.cell(coord.x+offset.dx, coord.y+offset.dy)
+			for _, neighborIdx := range neighbors {
+				if neighborIdx <= ballIdx {
+					continue
+				}
+				dx := balls[neighborIdx].pos.x - balls[ballIdx].pos.x
+				dy := balls[neighborIdx].pos.y - balls[ballIdx].pos.y
+				distSq := dx*dx + dy*dy
+				if distSq >= interactionRadiusSq || distSq < minimumSeparation*minimumSeparation {
+					continue
+				}
+				dist := float32(math.Sqrt(float64(distSq)))
+				if dist <= 0 {
+					continue
+				}
+				nx := dx / dist
+				ny := dy / dist
+				q := 1 - dist/interactionRadius
+				pressure := gasPressure * q * q
+				impulseX := nx * pressure
+				impulseY := ny * pressure
+				balls[ballIdx].velocity.vx -= impulseX
+				balls[ballIdx].velocity.vy -= impulseY
+				balls[neighborIdx].velocity.vx += impulseX
+				balls[neighborIdx].velocity.vy += impulseY
+
+				relVelX := balls[neighborIdx].velocity.vx - balls[ballIdx].velocity.vx
+				relVelY := balls[neighborIdx].velocity.vy - balls[ballIdx].velocity.vy
+				relAlongNormal := relVelX*nx + relVelY*ny
+				viscImpulse := relAlongNormal * gasViscosity * q * 0.5
+				viscX := nx * viscImpulse
+				viscY := ny * viscImpulse
+				balls[ballIdx].velocity.vx += viscX
+				balls[ballIdx].velocity.vy += viscY
+				balls[neighborIdx].velocity.vx -= viscX
+				balls[neighborIdx].velocity.vy -= viscY
+			}
+		}
+	}
+
+	if len(g.solidIndices) == 0 {
+		return
+	}
+
+	for idx, gasIdx := range g.gasIndices {
+		gasBall := &balls[gasIdx]
+		baseRange := gasBall.radius + gasRestDistance
+		coord := g.gasCellCache[idx]
+		for _, offset := range neighborOffsets {
+			neighbors := g.solidCollider.cell(coord.x+offset.dx, coord.y+offset.dy)
+			for _, solidIdx := range neighbors {
+				dx := gasBall.pos.x - balls[solidIdx].pos.x
+				dy := gasBall.pos.y - balls[solidIdx].pos.y
+				allowed := balls[solidIdx].radius + baseRange
+				distSq := dx*dx + dy*dy
+				if distSq >= allowed*allowed || distSq < minimumSeparation*minimumSeparation {
+					continue
+				}
+				dist := float32(math.Sqrt(float64(distSq)))
+				if dist <= 0 {
+					continue
+				}
+				nx := dx / dist
+				ny := dy / dist
+				penetration := allowed - dist
+				push := penetration * gasBoundaryPush
+				gasBall.velocity.vx += nx * push
+				gasBall.velocity.vy += ny * push
+				if balls[solidIdx].material != MaterialStatic {
+					balls[solidIdx].velocity.vx -= nx * push * 0.15
+					balls[solidIdx].velocity.vy -= ny * push * 0.15
+				}
+
+				tx := -ny
+				ty := nx
+				relVelX := gasBall.velocity.vx - balls[solidIdx].velocity.vx
+				relVelY := gasBall.velocity.vy - balls[solidIdx].velocity.vy
+				relTangential := relVelX*tx + relVelY*ty
+				drag := relTangential * gasBoundaryDrag
+				gasBall.velocity.vx -= tx * drag
+				gasBall.velocity.vy -= ty * drag
+				if balls[solidIdx].material != MaterialStatic {
+					balls[solidIdx].velocity.vx += tx * drag * 0.15
+					balls[solidIdx].velocity.vy += ty * drag * 0.15
+				}
+			}
+		}
+	}
+}
+
 func (g *Game) Draw(screen *ebiten.Image) {
 	fps := ebiten.CurrentFPS()
-	shapeName := []string{"Circle", "Square", "Triangle"}[currentShape]
-	bc := fmt.Sprintf("%.f balls | FPS: %.2f | ball radius: %.2f | attract radius: %.f | Shape: %s (1/2/3)",
-		float64(len(balls)), fps, ballsize, moveAttractDistance, shapeName)
+	shapeNames := []string{"Circle", "Square", "Triangle", "Water", "Gas", "Static"}
+	shapeLabel := "Unknown"
+	if int(currentShape) < len(shapeNames) {
+		shapeLabel = shapeNames[currentShape]
+	}
+	bc := fmt.Sprintf("%.f particles | FPS: %.2f | ball radius: %.2f | attract radius: %.f | spawn count: %d | Shape: %s (1/2/3/4/5/6)",
+		float64(len(balls)), fps, ballsize, moveAttractDistance, g.spawnClusterCount, shapeLabel)
 	ebitenutil.DebugPrint(screen, bc)
 
 	for i := range balls {
-		speed := balls[i].speed()
-		col := velocityToColor(speed, g.settings.maxSpeed)
+		var col color.Color
+		switch balls[i].material {
+		case MaterialWater:
+			col = color.RGBA{R: 45, G: 134, B: 255, A: 200}
+		case MaterialGas:
+			col = color.RGBA{R: 220, G: 220, B: 255, A: 140}
+		case MaterialStatic:
+			col = color.RGBA{R: 180, G: 180, B: 195, A: 240}
+		default:
+			speed := balls[i].speed()
+			col = velocityToColor(speed, g.settings.maxSpeed)
+		}
 		drawShape(screen, balls[i].shape, balls[i].pos.x, balls[i].pos.y, balls[i].radius, col)
 	}
 
@@ -483,6 +1153,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			fmt.Sprintf("Collision Restitution: %.2f", g.settings.collisionRestitution),
 			fmt.Sprintf("Air Drag: %.3f", g.settings.airDrag),
 			fmt.Sprintf("Ground Friction: %.2f", g.settings.groundFriction),
+			fmt.Sprintf("Spawn Count: %d", g.spawnClusterCount),
 			fmt.Sprintf("Top Barrier: %v", g.settings.hasTopBarrier),
 			"EXIT GAME",
 		}

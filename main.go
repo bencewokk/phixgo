@@ -1,10 +1,19 @@
 package main
 
 import (
+	"archive/zip"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"image/color"
+	"io"
 	"log"
 	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
@@ -39,6 +48,11 @@ const (
 	gasSpawnClampMax   = float32(30.0)
 	gasBoundaryPush    = float32(0.12)
 	gasBoundaryDrag    = float32(0.04)
+
+	// Update configuration
+	githubOwner = "bencewokk"
+	githubRepo  = "phixgo"
+	version     = "v1.0.0" // Current version
 )
 
 var (
@@ -95,6 +109,10 @@ type Game struct {
 	gasCollider       spatialHash
 	gasCellCache      []cellCoord
 	gasIndices        []int
+	updateButtonHover bool
+	updateChecking    bool
+	updateAvailable   bool
+	updateMessage     string
 }
 
 func NewGame() *Game {
@@ -534,6 +552,28 @@ func (g *Game) Update() error {
 
 		// Keep ballsize within reasonable bounds and ensure it's never zero
 		ballsize = math.Max(math.Min(ballsize, float64(maxSpawnRadius)), float64(minSpawnRadius))
+	}
+
+	// Handle update button click
+	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) && g.updateButtonHover && !g.updateChecking {
+		g.updateChecking = true
+		g.updateMessage = ""
+		go func() {
+			release, err := checkForUpdates()
+			if err != nil {
+				g.updateMessage = fmt.Sprintf("Error: %v", err)
+				g.updateChecking = false
+				return
+			}
+			if release == nil {
+				g.updateMessage = fmt.Sprintf("Up to date! (%s)", version)
+				g.updateAvailable = false
+			} else {
+				g.updateMessage = fmt.Sprintf("New version: %s", release.TagName)
+				g.updateAvailable = true
+			}
+			g.updateChecking = false
+		}()
 	}
 
 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
@@ -1166,13 +1206,304 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			ebitenutil.DebugPrintAt(screen, prefix+option, int(menuX), int(menuY)+i*20)
 		}
 	}
+
+	// Draw update button in top-right corner
+	if !g.showMenu {
+		buttonWidth := float32(140)
+		buttonHeight := float32(30)
+		buttonX := float32(screenWidth) - buttonWidth - 10
+		buttonY := float32(10)
+
+		// Check if mouse is hovering over button
+		mx, my := ebiten.CursorPosition()
+		g.updateButtonHover = float32(mx) >= buttonX && float32(mx) <= buttonX+buttonWidth &&
+			float32(my) >= buttonY && float32(my) <= buttonY+buttonHeight
+
+		// Draw button background
+		buttonColor := color.RGBA{60, 60, 80, 200}
+		if g.updateButtonHover {
+			buttonColor = color.RGBA{80, 80, 120, 220}
+		}
+		if g.updateAvailable {
+			buttonColor = color.RGBA{40, 120, 40, 200}
+			if g.updateButtonHover {
+				buttonColor = color.RGBA{60, 150, 60, 220}
+			}
+		}
+		vector.DrawFilledRect(screen, buttonX, buttonY, buttonWidth, buttonHeight, buttonColor, false)
+
+		// Draw button border
+		borderColor := color.RGBA{150, 150, 180, 255}
+		if g.updateButtonHover {
+			borderColor = color.RGBA{200, 200, 230, 255}
+		}
+		vector.StrokeRect(screen, buttonX, buttonY, buttonWidth, buttonHeight, 2, borderColor, false)
+
+		// Draw button text
+		buttonText := "Check Updates"
+		if g.updateChecking {
+			buttonText = "Checking..."
+		} else if g.updateAvailable {
+			buttonText = "Update Available!"
+		}
+		ebitenutil.DebugPrintAt(screen, buttonText, int(buttonX+8), int(buttonY+10))
+
+		// Show update message if available
+		if g.updateMessage != "" {
+			msgX := buttonX - 150
+			msgY := buttonY + buttonHeight + 5
+			msgWidth := float32(290)
+			msgHeight := float32(30)
+
+			// Message background
+			vector.DrawFilledRect(screen, msgX, msgY, msgWidth, msgHeight, color.RGBA{40, 40, 50, 220}, false)
+			ebitenutil.DebugPrintAt(screen, g.updateMessage, int(msgX+5), int(msgY+10))
+		}
+	}
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeight int) {
 	return outsideWidth, outsideHeight
 }
 
+// GitHubRelease represents a GitHub release
+type GitHubRelease struct {
+	TagName string `json:"tag_name"`
+	Assets  []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
+}
+
+// checkForUpdates checks if a newer version is available on GitHub
+func checkForUpdates() (*GitHubRelease, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", githubOwner, githubRepo)
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check for updates: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
+	}
+
+	var release GitHubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return nil, fmt.Errorf("failed to parse release info: %w", err)
+	}
+
+	if release.TagName == version {
+		return nil, nil // No update available
+	}
+
+	return &release, nil
+}
+
+// downloadFile downloads a file from a URL
+func downloadFile(url, filepath string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	out, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+// extractZip extracts a zip file to a destination directory
+func extractZip(src, dest string) error {
+	r, err := zip.OpenReader(src)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		fpath := filepath.Join(dest, f.Name)
+
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(fpath, os.ModePerm)
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil {
+			return err
+		}
+
+		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			return err
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			outFile.Close()
+			return err
+		}
+
+		_, err = io.Copy(outFile, rc)
+		outFile.Close()
+		rc.Close()
+
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// selfUpdate downloads and installs the latest version
+func selfUpdate() error {
+	fmt.Println("Checking for updates...")
+	release, err := checkForUpdates()
+	if err != nil {
+		return err
+	}
+
+	if release == nil {
+		fmt.Println("You are already running the latest version:", version)
+		return nil
+	}
+
+	fmt.Printf("New version available: %s (current: %s)\n", release.TagName, version)
+
+	// Determine the correct asset based on OS and architecture
+	osName := runtime.GOOS
+	arch := runtime.GOARCH
+	var assetName string
+	
+	switch osName {
+	case "windows":
+		assetName = fmt.Sprintf("phixgo-%s-windows-%s.zip", release.TagName, arch)
+	case "darwin":
+		assetName = fmt.Sprintf("phixgo-%s-darwin-%s.zip", release.TagName, arch)
+	case "linux":
+		assetName = fmt.Sprintf("phixgo-%s-linux-%s.zip", release.TagName, arch)
+	default:
+		return fmt.Errorf("unsupported operating system: %s", osName)
+	}
+
+	// Find the asset
+	var downloadURL string
+	for _, asset := range release.Assets {
+		if asset.Name == assetName {
+			downloadURL = asset.BrowserDownloadURL
+			break
+		}
+	}
+
+	if downloadURL == "" {
+		return fmt.Errorf("no compatible release found for %s-%s", osName, arch)
+	}
+
+	fmt.Printf("Downloading %s...\n", assetName)
+
+	// Download to temporary file
+	tmpFile := filepath.Join(os.TempDir(), assetName)
+	if err := downloadFile(downloadURL, tmpFile); err != nil {
+		return fmt.Errorf("failed to download update: %w", err)
+	}
+	defer os.Remove(tmpFile)
+
+	fmt.Println("Extracting update...")
+
+	// Extract to temporary directory
+	tmpDir := filepath.Join(os.TempDir(), "phixgo-update")
+	os.RemoveAll(tmpDir)
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := extractZip(tmpFile, tmpDir); err != nil {
+		return fmt.Errorf("failed to extract update: %w", err)
+	}
+
+	// Find the executable in the extracted files
+	exeName := "phixgo"
+	if osName == "windows" {
+		exeName = "phixgo.exe"
+	}
+
+	var newExePath string
+	err = filepath.Walk(tmpDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(info.Name(), exeName) {
+			newExePath = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	if newExePath == "" {
+		return fmt.Errorf("executable not found in downloaded archive")
+	}
+
+	// Get current executable path
+	currentExe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get current executable path: %w", err)
+	}
+
+	// Backup current executable
+	backupPath := currentExe + ".old"
+	if err := os.Rename(currentExe, backupPath); err != nil {
+		return fmt.Errorf("failed to backup current executable: %w", err)
+	}
+
+	// Copy new executable
+	newExe, err := os.Open(newExePath)
+	if err != nil {
+		os.Rename(backupPath, currentExe) // Restore backup on error
+		return fmt.Errorf("failed to open new executable: %w", err)
+	}
+	defer newExe.Close()
+
+	currentExeFile, err := os.OpenFile(currentExe, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+	if err != nil {
+		os.Rename(backupPath, currentExe) // Restore backup on error
+		return fmt.Errorf("failed to create new executable: %w", err)
+	}
+	defer currentExeFile.Close()
+
+	if _, err := io.Copy(currentExeFile, newExe); err != nil {
+		os.Rename(backupPath, currentExe) // Restore backup on error
+		return fmt.Errorf("failed to copy new executable: %w", err)
+	}
+
+	// Remove backup on success
+	os.Remove(backupPath)
+
+	fmt.Printf("Successfully updated to version %s!\n", release.TagName)
+	fmt.Println("Please restart the application.")
+	return nil
+}
+
 func main() {
+	updateFlag := flag.Bool("update", false, "Check for updates and install the latest version")
+	flag.Parse()
+
+	if *updateFlag {
+		if err := selfUpdate(); err != nil {
+			fmt.Fprintf(os.Stderr, "Update failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	ebiten.SetWindowResizingMode(2)
 	ebiten.SetFullscreen(true)
 	ebiten.SetWindowTitle("PHIX")

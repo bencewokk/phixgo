@@ -52,7 +52,7 @@ const (
 	// Update configuration
 	githubOwner = "bencewokk"
 	githubRepo  = "phixgo"
-	version     = "v1.0.0" // Current version
+	version     = "v1.0.1" // Current version
 
 	defaultSceneFileName = "phixgo-scene.json"
 )
@@ -99,6 +99,7 @@ type Game struct {
 	prevDownPressed   bool
 	prevSavePressed   bool
 	prevLoadPressed   bool
+	prevSlotPressed   [9]bool
 	collider          spatialHash
 	cellCache         []cellCoord
 	spawnClusterCount int
@@ -346,6 +347,13 @@ func saveSceneToFile(filename string, g *Game) error {
 		return fmt.Errorf("failed to replace scene file: %w", err)
 	}
 	return nil
+}
+
+func sceneSlotFileName(slot int) string {
+	if slot < 1 {
+		slot = 1
+	}
+	return fmt.Sprintf("phixgo-scene-%d.json", slot)
 }
 
 func loadSceneFromFile(filename string, g *Game) error {
@@ -699,6 +707,7 @@ func (g *Game) Update() error {
 
 	// Save/Load scene (no file dialog; uses working directory)
 	ctrlDown := ebiten.IsKeyPressed(ebiten.KeyControl) || ebiten.IsKeyPressed(ebiten.KeyMeta)
+	shiftDown := ebiten.IsKeyPressed(ebiten.KeyShift)
 	savePressed := ctrlDown && ebiten.IsKeyPressed(ebiten.KeyS)
 	loadPressed := ctrlDown && ebiten.IsKeyPressed(ebiten.KeyO)
 
@@ -718,6 +727,33 @@ func (g *Game) Update() error {
 	}
 	g.prevSavePressed = savePressed
 	g.prevLoadPressed = loadPressed
+
+	// Slots: Ctrl+1..9 loads; Ctrl+Shift+1..9 saves
+	slotKeys := [...]ebiten.Key{
+		ebiten.Key1, ebiten.Key2, ebiten.Key3, ebiten.Key4, ebiten.Key5,
+		ebiten.Key6, ebiten.Key7, ebiten.Key8, ebiten.Key9,
+	}
+	for i, key := range slotKeys {
+		pressed := ctrlDown && ebiten.IsKeyPressed(key)
+		if pressed && !g.prevSlotPressed[i] {
+			slot := i + 1
+			filename := sceneSlotFileName(slot)
+			if shiftDown {
+				if err := saveSceneToFile(filename, g); err != nil {
+					g.updateMessage = fmt.Sprintf("Save slot %d failed: %v", slot, err)
+				} else {
+					g.updateMessage = fmt.Sprintf("Saved slot %d", slot)
+				}
+			} else {
+				if err := loadSceneFromFile(filename, g); err != nil {
+					g.updateMessage = fmt.Sprintf("Load slot %d failed: %v", slot, err)
+				} else {
+					g.updateMessage = fmt.Sprintf("Loaded slot %d", slot)
+				}
+			}
+		}
+		g.prevSlotPressed[i] = pressed
+	}
 
 	// Shape selection with number keys
 	if ebiten.IsKeyPressed(ebiten.Key1) {
@@ -1578,7 +1614,7 @@ func selfUpdate() error {
 	osName := runtime.GOOS
 	arch := runtime.GOARCH
 	var assetName string
-	
+
 	switch osName {
 	case "windows":
 		assetName = fmt.Sprintf("phixgo-%s-windows-%s.zip", release.TagName, arch)

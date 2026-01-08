@@ -9,6 +9,8 @@
 - **Mouse Wheel**: Adjust the radius of the balls (scroll up to increase, scroll down to decrease).
 - **Ctrl + S**: Save the current scene to `phixgo-scene.json`.
 - **Ctrl + O**: Load the scene from `phixgo-scene.json`.
+- **Ctrl + 1..9**: Load from a slot file (`phixgo-scene-<n>.json`).
+- **Ctrl + Shift + 1..9**: Save to a slot file (`phixgo-scene-<n>.json`).
 
 ## How to run
 

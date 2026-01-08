@@ -7,6 +7,8 @@
 - **Right Mouse Button**: Move balls away from the cursor position.
 - **Shift + Right Mouse Button**: Attract balls toward the cursor position.
 - **Mouse Wheel**: Adjust the radius of the balls (scroll up to increase, scroll down to decrease).
+- **Ctrl + S**: Save the current scene to `phixgo-scene.json`.
+- **Ctrl + O**: Load the scene from `phixgo-scene.json`.
 
 ## How to run
 

@@ -53,6 +53,8 @@ const (
 	githubOwner = "bencewokk"
 	githubRepo  = "phixgo"
 	version     = "v1.0.0" // Current version
+
+	defaultSceneFileName = "phixgo-scene.json"
 )
 
 var (
@@ -95,6 +97,8 @@ type Game struct {
 	prevEscPressed    bool
 	prevUpPressed     bool
 	prevDownPressed   bool
+	prevSavePressed   bool
+	prevLoadPressed   bool
 	collider          spatialHash
 	cellCache         []cellCoord
 	spawnClusterCount int
@@ -188,6 +192,179 @@ func createStaticSolid(pos Pos, r float32, shape ShapeType) Ball {
 	b := createBall(pos, r, shape)
 	b.material = MaterialStatic
 	return b
+}
+
+type sceneSettingsDTO struct {
+	Gravity              float32 `json:"gravity"`
+	MaxSpeed             float32 `json:"max_speed"`
+	MoveAwayDistance     float32 `json:"move_away_distance"`
+	MoveAwayStrength     float32 `json:"move_away_strength"`
+	MoveAttractStrength  float32 `json:"move_attract_strength"`
+	GroundRestitution    float32 `json:"ground_restitution"`
+	CollisionRestitution float32 `json:"collision_restitution"`
+	AirDrag              float32 `json:"air_drag"`
+	GroundFriction       float32 `json:"ground_friction"`
+	HasTopBarrier        bool    `json:"has_top_barrier"`
+}
+
+type sceneBallDTO struct {
+	X        float32      `json:"x"`
+	Y        float32      `json:"y"`
+	VX       float32      `json:"vx"`
+	VY       float32      `json:"vy"`
+	Radius   float32      `json:"radius"`
+	Shape    ShapeType    `json:"shape"`
+	Material MaterialType `json:"material"`
+}
+
+type sceneDTO struct {
+	SceneVersion        int              `json:"scene_version"`
+	AppVersion          string           `json:"app_version"`
+	Settings            sceneSettingsDTO `json:"settings"`
+	Balls               []sceneBallDTO   `json:"balls"`
+	BallSize            float64          `json:"ball_size"`
+	MoveAttractDistance float64          `json:"move_attract_distance"`
+	SpawnClusterCount   int              `json:"spawn_cluster_count"`
+	CurrentShape        ShapeType        `json:"current_shape"`
+}
+
+func settingsToDTO(s Settings) sceneSettingsDTO {
+	return sceneSettingsDTO{
+		Gravity:              s.gravity,
+		MaxSpeed:             s.maxSpeed,
+		MoveAwayDistance:     s.moveAwayDistance,
+		MoveAwayStrength:     s.moveAwayStrength,
+		MoveAttractStrength:  s.moveAttractStrength,
+		GroundRestitution:    s.groundRestitution,
+		CollisionRestitution: s.collisionRestitution,
+		AirDrag:              s.airDrag,
+		GroundFriction:       s.groundFriction,
+		HasTopBarrier:        s.hasTopBarrier,
+	}
+}
+
+func settingsFromDTO(d sceneSettingsDTO) Settings {
+	return Settings{
+		gravity:              d.Gravity,
+		maxSpeed:             d.MaxSpeed,
+		moveAwayDistance:     d.MoveAwayDistance,
+		moveAwayStrength:     d.MoveAwayStrength,
+		moveAttractStrength:  d.MoveAttractStrength,
+		groundRestitution:    d.GroundRestitution,
+		collisionRestitution: d.CollisionRestitution,
+		airDrag:              d.AirDrag,
+		groundFriction:       d.GroundFriction,
+		hasTopBarrier:        d.HasTopBarrier,
+	}
+}
+
+func buildScene(g *Game) sceneDTO {
+	ballDTOs := make([]sceneBallDTO, len(balls))
+	for i := range balls {
+		ballDTOs[i] = sceneBallDTO{
+			X:        balls[i].pos.x,
+			Y:        balls[i].pos.y,
+			VX:       balls[i].velocity.vx,
+			VY:       balls[i].velocity.vy,
+			Radius:   balls[i].radius,
+			Shape:    balls[i].shape,
+			Material: balls[i].material,
+		}
+	}
+
+	return sceneDTO{
+		SceneVersion:        1,
+		AppVersion:          version,
+		Settings:            settingsToDTO(g.settings),
+		Balls:               ballDTOs,
+		BallSize:            ballsize,
+		MoveAttractDistance: moveAttractDistance,
+		SpawnClusterCount:   g.spawnClusterCount,
+		CurrentShape:        currentShape,
+	}
+}
+
+func applyScene(g *Game, scene sceneDTO) error {
+	if scene.SceneVersion != 1 {
+		return fmt.Errorf("unsupported scene version: %d", scene.SceneVersion)
+	}
+
+	g.settings = settingsFromDTO(scene.Settings)
+
+	g.spawnClusterCount = scene.SpawnClusterCount
+	if g.spawnClusterCount < 1 {
+		g.spawnClusterCount = 1
+	}
+	if g.spawnClusterCount > 50 {
+		g.spawnClusterCount = 50
+	}
+
+	ballsize = scene.BallSize
+	ballsize = math.Max(math.Min(ballsize, float64(maxSpawnRadius)), float64(minSpawnRadius))
+
+	moveAttractDistance = scene.MoveAttractDistance
+	if moveAttractDistance < 10 {
+		moveAttractDistance = 10
+	}
+
+	currentShape = scene.CurrentShape
+
+	loadedBalls := make([]Ball, 0, len(scene.Balls))
+	for _, b := range scene.Balls {
+		if b.Radius <= 0 {
+			continue
+		}
+		loadedBalls = append(loadedBalls, Ball{
+			pos:      Pos{x: b.X, y: b.Y},
+			velocity: Velocity{vx: b.VX, vy: b.VY},
+			radius:   b.Radius,
+			shape:    b.Shape,
+			material: b.Material,
+		})
+	}
+	balls = loadedBalls
+
+	return nil
+}
+
+func saveSceneToFile(filename string, g *Game) error {
+	if filename == "" {
+		filename = defaultSceneFileName
+	}
+	filename = filepath.Clean(filename)
+	data, err := json.MarshalIndent(buildScene(g), "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to encode scene: %w", err)
+	}
+
+	tmp := filename + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("failed to write temp scene file: %w", err)
+	}
+	_ = os.Remove(filename)
+	if err := os.Rename(tmp, filename); err != nil {
+		return fmt.Errorf("failed to replace scene file: %w", err)
+	}
+	return nil
+}
+
+func loadSceneFromFile(filename string, g *Game) error {
+	if filename == "" {
+		filename = defaultSceneFileName
+	}
+	filename = filepath.Clean(filename)
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("failed to read scene file: %w", err)
+	}
+	var scene sceneDTO
+	if err := json.Unmarshal(data, &scene); err != nil {
+		return fmt.Errorf("failed to decode scene file: %w", err)
+	}
+	if err := applyScene(g, scene); err != nil {
+		return err
+	}
+	return nil
 }
 
 // spatialHash accelerates neighbor lookups via a uniform grid.
@@ -519,6 +696,28 @@ func (g *Game) Update() error {
 
 		return nil // Don't update physics when menu is open
 	}
+
+	// Save/Load scene (no file dialog; uses working directory)
+	ctrlDown := ebiten.IsKeyPressed(ebiten.KeyControl) || ebiten.IsKeyPressed(ebiten.KeyMeta)
+	savePressed := ctrlDown && ebiten.IsKeyPressed(ebiten.KeyS)
+	loadPressed := ctrlDown && ebiten.IsKeyPressed(ebiten.KeyO)
+
+	if savePressed && !g.prevSavePressed {
+		if err := saveSceneToFile(defaultSceneFileName, g); err != nil {
+			g.updateMessage = fmt.Sprintf("Save failed: %v", err)
+		} else {
+			g.updateMessage = fmt.Sprintf("Saved: %s", defaultSceneFileName)
+		}
+	}
+	if loadPressed && !g.prevLoadPressed {
+		if err := loadSceneFromFile(defaultSceneFileName, g); err != nil {
+			g.updateMessage = fmt.Sprintf("Load failed: %v", err)
+		} else {
+			g.updateMessage = fmt.Sprintf("Loaded: %s", defaultSceneFileName)
+		}
+	}
+	g.prevSavePressed = savePressed
+	g.prevLoadPressed = loadPressed
 
 	// Shape selection with number keys
 	if ebiten.IsKeyPressed(ebiten.Key1) {
